@@ -1,364 +1,277 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Input } from '@/components/ui/input';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { ImageIcon } from 'lucide-react';
-import { FloatingToolbar } from './FloatingToolbar';
+import { Plus, Minus, Download, Undo, Trash2, Settings } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import ControlPanel from './ControlPanel';
 import { useMarkers } from '@/hooks/useMarkers';
-import { useCanvas } from '@/hooks/useCanvas';
-import { useImageUpload } from '@/hooks/useImageUpload';
-import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { usePersistedSettings } from '@/hooks/usePersistedSettings';
-import { useSessionPersistence } from '@/hooks/useSessionPersistence';
-import { getCanvasCoordinates, getCanvasCoordinatesFromTouch, getMarkerAtPosition } from '@/utils/canvasUtils';
-import { createSpatialIndex, type SpatialIndex } from '@/utils/spatialIndex';
 import { downloadAnnotatedImage } from '@/utils/downloadUtils';
-import * as sessionService from '@/services/sessionService';
+import { getMarkerAtPosition } from '@/utils/canvasUtils';
+import type { Marker } from '@/lib/types';
+
+const FIXED_IMAGE = '/begonias_in_eu_col_d.jpg';
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 6;
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
 
 export default function ImageAnnotator() {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [image, setImage] = useState<HTMLImageElement | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isDownloading, setIsDownloading] = useState(false);
-  const [spatialIndex, setSpatialIndex] = useState<SpatialIndex | null>(null);
-  const initializationAttemptedRef = useRef(false);
-  
-  // Persistent settings hook replaces local state
-  const {
-    settings: markerSettings,
-    updateSettings: setMarkerSettings,
-  } = usePersistedSettings();
-  
-  // Session persistence hook for auto-save and restoration
-  const {
-    updateMarkers: saveMarkers,
-    updateCanvasDimensions: saveCanvasDimensions,
-    initializeSession,
-    clearSession,
-  } = useSessionPersistence();
+  const panRef = useRef({ x: 0, y: 0 });
+  const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+  const pinchRef = useRef<{ distance: number; zoom: number; centerX: number; centerY: number } | null>(null);
+  const { markers, hoveredMarkerId, setHoveredMarkerId, addMarker, removeMarker, undoLastMarker, clearAllMarkers, updateMarkerCounts } = useMarkers();
+  const { settings: markerSettings, updateSettings: setMarkerSettings } = usePersistedSettings();
 
-  // Custom hooks
-  const {
-    markers,
-    hoveredMarkerId,
-    setHoveredMarkerId,
-    addMarker,
-    removeMarker,
-    undoLastMarker,
-    clearAllMarkers,
-    resetMarkersOnNewImage,
-    scaleMarkers,
-    restoreMarkers,
-    updateMarkerCounts,
-  } = useMarkers();
-
-  const { image, fileInputRef, handleImageUpload, handleDragOver, handleDrop, triggerUpload, restoreImage, clearImage } = useImageUpload(
-    async (uploadedImage: HTMLImageElement, imageName: string) => {
-      resetMarkersOnNewImage();
-      // Create new session when image is uploaded
-      try {
-        await sessionService.createNewSession(uploadedImage, imageName, canvasDimensions);
-      } catch (error: any) {
-        console.error('Failed to create new session:', error);
-        toast.error('Failed to save session');
-      }
-    }
-  );
-
-  const { canvasRef, canvasDimensions, restoreCanvasDimensions } = useCanvas(image, markers, hoveredMarkerId, scaleMarkers);
-  
-  // Initialize spatial index when canvas dimensions are available
   useEffect(() => {
-    if (canvasDimensions.width > 0 && canvasDimensions.height > 0) {
-      const newSpatialIndex = createSpatialIndex(canvasDimensions.width, canvasDimensions.height);
-      if (markers.length > 0) {
-        newSpatialIndex.addMarkers(markers);
-      }
-      setSpatialIndex(newSpatialIndex);
-    }
-  }, [canvasDimensions.width, canvasDimensions.height]);
-
-  // Update spatial index when markers change
-  useEffect(() => {
-    if (spatialIndex && markers.length >= 0) {
-      spatialIndex.rebuildIndex(markers);
-    }
-  }, [markers, spatialIndex]);
-  
-  // Update spatial index when canvas dimensions change during resize
-  useEffect(() => {
-    if (spatialIndex && canvasDimensions.width > 0 && canvasDimensions.height > 0) {
-      spatialIndex.updateDimensions(canvasDimensions.width, canvasDimensions.height);
-    }
-  }, [spatialIndex, canvasDimensions.width, canvasDimensions.height]);
-  
-  // Initialize session on component mount
-  useEffect(() => {
-    // Prevent duplicate initialization (React Strict Mode protection)
-    if (initializationAttemptedRef.current) return;
-    initializationAttemptedRef.current = true;
-    
-    const initSession = async () => {
-      try {
-        const restored = await initializeSession();
-        if (restored) {
-          // Restore the session data to the UI
-          restoreImage(restored.image);
-          restoreMarkers(restored.markers);
-          restoreCanvasDimensions(restored.canvasDimensions);
-        }
-      } catch (error: any) {
-        console.error('Session initialization failed:', error);
-      }
-    };
-    
-    initSession();
-  }, [initializeSession, restoreImage, restoreMarkers, restoreCanvasDimensions]);
-  
-  // Auto-save markers when they change
-  useEffect(() => {
-    if (image && markers.length >= 0) {
-      saveMarkers(markers);
-    }
-  }, [markers, saveMarkers, image]);
-  
-  // Update canvas dimensions in session when they change
-  useEffect(() => {
-    if (image && canvasDimensions) {
-      saveCanvasDimensions(canvasDimensions).catch((error: any) => {
-        console.error('Failed to update canvas dimensions:', error);
-      });
-    }
-  }, [canvasDimensions, saveCanvasDimensions, image]);
-  
-  // Cleanup mouse move timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (mouseMoveTimeoutRef.current) {
-        clearTimeout(mouseMoveTimeoutRef.current);
-        mouseMoveTimeoutRef.current = null;
-      }
-    };
+    const img = new Image();
+    img.onload = () => setImage(img);
+    img.onerror = () => toast.error('Could not load the Begonia image');
+    img.src = FIXED_IMAGE;
   }, []);
 
-  // Handle download with loading state
+  const redraw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !image) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    markers.forEach((marker) => {
+      ctx.save();
+      ctx.fillStyle = marker.color;
+      ctx.globalAlpha = marker.opacity / 100;
+      ctx.beginPath();
+      ctx.arc(marker.x, marker.y, Math.max(5, marker.size), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = marker.borderColor;
+      ctx.lineWidth = marker.borderSize;
+      ctx.stroke();
+      if (marker.showCount && marker.count !== undefined) {
+        ctx.fillStyle = marker.countColor || '#ffffff';
+        ctx.font = `bold ${marker.countFontSize || 14}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 2;
+        ctx.strokeText(String(marker.count), marker.x, marker.y);
+        ctx.fillText(String(marker.count), marker.x, marker.y);
+      }
+      ctx.restore();
+    });
+  }, [image, markers]);
+
+  useEffect(() => { redraw(); }, [redraw, hoveredMarkerId]);
+
+  const fitAndReset = useCallback(() => {
+    setZoom(1);
+    panRef.current = { x: 0, y: 0 };
+    setPan(panRef.current);
+  }, []);
+
+  useEffect(() => {
+    fitAndReset();
+    const handler = () => fitAndReset();
+    window.addEventListener('resize', handler);
+    return () => window.removeEventListener('resize', handler);
+  }, [fitAndReset, image]);
+
+  const setZoomAtPoint = (nextZoom: number, clientX?: number, clientY?: number) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const rect = viewport.getBoundingClientRect();
+    const localX = clientX === undefined ? rect.width / 2 : clientX - rect.left;
+    const localY = clientY === undefined ? rect.height / 2 : clientY - rect.top;
+    const next = clamp(nextZoom, MIN_ZOOM, MAX_ZOOM);
+    const old = zoom;
+    const cx = (localX - panRef.current.x) / old;
+    const cy = (localY - panRef.current.y) / old;
+    const nextPan = { x: localX - cx * next, y: localY - cy * next };
+    const maxX = Math.max(0, (rect.width * next - rect.width) / 2);
+    const maxY = Math.max(0, (rect.height * next - rect.height) / 2);
+    nextPan.x = clamp(nextPan.x, -maxX, maxX);
+    nextPan.y = clamp(nextPan.y, -maxY, maxY);
+    panRef.current = nextPan;
+    setPan(nextPan);
+    setZoom(next);
+  };
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { x: event.clientX, y: event.clientY, panX: panRef.current.x, panY: panRef.current.y };
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current || zoom <= 1) return;
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const rect = viewport.getBoundingClientRect();
+    const dx = event.clientX - dragRef.current.x;
+    const dy = event.clientY - dragRef.current.y;
+    const maxX = Math.max(0, (rect.width * zoom - rect.width) / 2);
+    const maxY = Math.max(0, (rect.height * zoom - rect.height) / 2);
+    const next = {
+      x: clamp(dragRef.current.panX + dx, -maxX, maxX),
+      y: clamp(dragRef.current.panY + dy, -maxY, maxY),
+    };
+    panRef.current = next;
+    setPan(next);
+  };
+
+  const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    dragRef.current = null;
+  };
+
+  const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !image) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * image.naturalWidth;
+    const y = ((event.clientY - rect.top) / rect.height) * image.naturalHeight;
+
+    const displayMarkers: Marker[] = markers.map((marker) => ({
+      ...marker,
+      x: (marker.x / image.naturalWidth) * rect.width,
+      y: (marker.y / image.naturalHeight) * rect.height,
+      size: Math.max(5, (marker.size / image.naturalWidth) * rect.width),
+    }));
+    const local = getMarkerAtPosition(event.clientX - rect.left, event.clientY - rect.top, displayMarkers);
+    if (local) {
+      removeMarker(local.id);
+      return;
+    }
+
+    addMarker(clamp(x, 0, image.naturalWidth), clamp(y, 0, image.naturalHeight), {
+      ...markerSettings,
+      size: Math.max(5, markerSettings.size),
+    });
+  };
+
+  const touchDistance = (touches: React.TouchList) => {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  };
+
+  const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
+    if (event.touches.length === 2) {
+      const midpointX = (event.touches[0].clientX + event.touches[1].clientX) / 2;
+      const midpointY = (event.touches[0].clientY + event.touches[1].clientY) / 2;
+      pinchRef.current = { distance: touchDistance(event.touches), zoom, centerX: midpointX, centerY: midpointY };
+    }
+  };
+
+  const handleTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
+    if (event.touches.length === 2 && pinchRef.current) {
+      event.preventDefault();
+      const distance = touchDistance(event.touches);
+      const midpointX = (event.touches[0].clientX + event.touches[1].clientX) / 2;
+      const midpointY = (event.touches[0].clientY + event.touches[1].clientY) / 2;
+      setZoomAtPoint(pinchRef.current.zoom * (distance / pinchRef.current.distance), midpointX, midpointY);
+    }
+  };
+
+  const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setZoomAtPoint(zoom * (event.deltaY < 0 ? 1.2 : 1 / 1.2), event.clientX, event.clientY);
+  };
+
   const handleDownload = async () => {
     if (!image) return;
-
     setIsDownloading(true);
     try {
-      await downloadAnnotatedImage(image, markers, canvasDimensions);
-      toast.success('High quality image downloaded successfully');
-    } catch (error) {
+      await downloadAnnotatedImage(image, markers, { width: image.naturalWidth, height: image.naturalHeight });
+      toast.success('Original-resolution image downloaded');
+    } catch {
       toast.error('Failed to download image');
     } finally {
       setIsDownloading(false);
     }
   };
 
-  // Reset count functionality
   const resetCount = () => {
-    const newSettings = { ...markerSettings, countStartFrom: 1 };
-    setMarkerSettings(newSettings);
-    updateMarkerCounts(1, newSettings);
-    toast.success('Count reset');
+    const settings = { ...markerSettings, countStartFrom: 1 };
+    setMarkerSettings(settings);
+    updateMarkerCounts(1, settings);
   };
-
-  // Clear canvas functionality (remove image and markers)
-  const handleClearCanvas = async () => {
-    clearAllMarkers();
-    clearImage();
-    try {
-      await clearSession();
-      toast.success('Canvas cleared');
-    } catch (error) {
-      console.error('Failed to clear session:', error);
-      toast.error('Failed to clear session');
-    }
-  };
-
-  // Canvas interaction handlers
-  const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!image) return;
-
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const coords = getCanvasCoordinates(event, canvas);
-    if (!coords) return;
-
-    // Check if clicking on existing marker to delete it
-    const clickedMarker = spatialIndex ? 
-      spatialIndex.getMarkerAtPosition(coords.x, coords.y) : 
-      getMarkerAtPosition(coords.x, coords.y, markers);
-    if (clickedMarker) {
-      removeMarker(clickedMarker.id);
-      return;
-    }
-
-    // Place new marker
-    addMarker(coords.x, coords.y, markerSettings);
-  };
-
-  // Throttled mouse move handler for better performance
-  const mouseMoveTimeoutRef = useRef<number | null>(null);
-  const lastMouseMoveTimeRef = useRef<number>(0);
-  const MOUSE_MOVE_THROTTLE_MS = 16; // ~60fps (1000ms / 60fps = 16.67ms)
-  
-  const handleCanvasMouseMove = useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!image) return;
-
-    const now = performance.now();
-    const timeSinceLastMove = now - lastMouseMoveTimeRef.current;
-    
-    // Clear existing timeout
-    if (mouseMoveTimeoutRef.current) {
-      clearTimeout(mouseMoveTimeoutRef.current);
-      mouseMoveTimeoutRef.current = null;
-    }
-    
-    const processMouseMove = () => {
-      const canvas = canvasRef.current;
-      if (!canvas || !image) return;
-
-      const coords = getCanvasCoordinates(event, canvas);
-      if (!coords) return;
-
-      const marker = spatialIndex ? 
-        spatialIndex.getMarkerAtPosition(coords.x, coords.y) : 
-        getMarkerAtPosition(coords.x, coords.y, markers);
-      setHoveredMarkerId(marker ? marker.id : null);
-
-      // Change cursor style
-      canvas.style.cursor = marker ? 'pointer' : 'crosshair';
-      
-      lastMouseMoveTimeRef.current = performance.now();
-    };
-    
-    // If enough time has passed, process immediately
-    if (timeSinceLastMove >= MOUSE_MOVE_THROTTLE_MS) {
-      processMouseMove();
-    } else {
-      // Otherwise, throttle the update
-      const remainingTime = MOUSE_MOVE_THROTTLE_MS - timeSinceLastMove;
-      mouseMoveTimeoutRef.current = window.setTimeout(() => {
-        processMouseMove();
-        mouseMoveTimeoutRef.current = null;
-      }, remainingTime);
-    }
-  }, [image, markers, canvasRef]);
-
-  const handleCanvasMouseLeave = useCallback(() => {
-    // Clear any pending mouse move updates
-    if (mouseMoveTimeoutRef.current) {
-      clearTimeout(mouseMoveTimeoutRef.current);
-      mouseMoveTimeoutRef.current = null;
-    }
-    
-    setHoveredMarkerId(null);
-    const canvas = canvasRef.current;
-    if (canvas) {
-      canvas.style.cursor = 'crosshair';
-    }
-  }, []);
-
-  const handleTouchStart = (event: React.TouchEvent<HTMLCanvasElement>) => {
-    if (!image) return;
-
-    event.preventDefault(); // Prevent default touch behavior
-
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const coords = getCanvasCoordinatesFromTouch(event, canvas);
-    if (!coords) return;
-
-    // Check if touching existing marker to delete it
-    const touchedMarker = spatialIndex ? 
-      spatialIndex.getMarkerAtPosition(coords.x, coords.y) : 
-      getMarkerAtPosition(coords.x, coords.y, markers);
-    if (touchedMarker) {
-      removeMarker(touchedMarker.id);
-      return;
-    }
-
-    // Place new marker
-    addMarker(coords.x, coords.y, markerSettings);
-  };
-
-  // Keyboard shortcuts
-  useKeyboardShortcuts({
-    onUndo: undoLastMarker,
-    onDownload: handleDownload,
-    hasMarkers: markers.length > 0,
-    hasImage: !!image,
-  });
 
   return (
-    <TooltipProvider>
-      <div 
-        className="relative w-screen h-screen bg-background overflow-hidden"
-        onDragOver={handleDragOver}
-        onDrop={handleDrop}
-      >
-        {/* Hidden file input */}
-        <Input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          onChange={handleImageUpload}
-          className="hidden"
-          aria-label="Upload image"
-        />
-
-        {/* Floating Toolbar */}
-        <FloatingToolbar
-          onUpload={triggerUpload}
-          onDownload={handleDownload}
-          onUndo={undoLastMarker}
-          onClearAll={clearAllMarkers}
-          onClearCanvas={handleClearCanvas}
-          markerCount={markers.length}
-          hasImage={!!image}
-          isDownloading={isDownloading}
-          hasMarkers={markers.length > 0}
-          markerSettings={markerSettings}
-          onSettingsChange={setMarkerSettings}
-          onResetCount={resetCount}
-        />
-
-        {/* Full Screen Canvas Area */}
-        <div className="absolute inset-0 pt-20 flex items-center justify-center">
-          {image ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <canvas
-                  ref={canvasRef}
-                  width={canvasDimensions.width}
-                  height={canvasDimensions.height}
-                  onClick={handleCanvasClick}
-                  onMouseMove={handleCanvasMouseMove}
-                  onMouseLeave={handleCanvasMouseLeave}
-                  onTouchStart={handleTouchStart}
-                  className="touch-none border rounded-lg shadow-lg"
-                  style={{ cursor: 'crosshair' }}
-                  aria-label="Image canvas with markers"
-                />
-              </TooltipTrigger>
-              <TooltipContent>
-                <p>Click to place marker • Click marker to delete</p>
-              </TooltipContent>
-            </Tooltip>
-          ) : (
-            <div className="flex items-center justify-center h-64 w-72 rounded-lg text-muted-foreground">
-              <div className="text-center">
-                <div className="mx-auto h-12 w-12 mb-2 opacity-50 text-muted-foreground">
-                  <ImageIcon className="h-12 w-12 text-muted-foreground/40" />
-                </div>
-                <p className="text-muted-foreground/40">No image loaded</p>
-                <p className="text-sm text-muted-foreground/40">Use Upload button or drag and drop to start</p>
-              </div>
-            </div>
-          )}
+    <main className="fixed inset-0 flex flex-col bg-neutral-950 text-white overflow-hidden">
+      <header className="h-14 shrink-0 flex items-center justify-between gap-2 px-3 border-b border-white/10 bg-neutral-950/95 z-40">
+        <div className="flex items-center gap-2 min-w-0">
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-10 w-10" aria-label="Marker settings"><Settings className="h-5 w-5" /></Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-[min(18rem,calc(100vw-1.5rem))] p-0"><ControlPanel settings={markerSettings} onSettingsChange={setMarkerSettings} markerCount={markers.length} onResetCount={resetCount} /></PopoverContent>
+          </Popover>
+          <span className="font-semibold truncate">Begonia Marker</span>
+          <span className="hidden sm:inline text-xs text-white/50">{markers.length} markers</span>
         </div>
-      </div>
-    </TooltipProvider>
+        <div className="flex items-center gap-1">
+          <Button variant="ghost" size="icon" className="h-10 w-10" onClick={undoLastMarker} disabled={!markers.length} aria-label="Undo"><Undo className="h-5 w-5" /></Button>
+          <Button variant="ghost" size="icon" className="h-10 w-10" onClick={clearAllMarkers} disabled={!markers.length} aria-label="Clear markers"><Trash2 className="h-5 w-5" /></Button>
+          <Button variant="secondary" className="h-10 px-3" onClick={handleDownload} disabled={!image || isDownloading}>
+            <Download className="h-4 w-4 mr-2" /> <span className="hidden sm:inline">Download</span>
+          </Button>
+        </div>
+      </header>
+
+      <section
+        ref={viewportRef}
+        className="relative flex-1 overflow-hidden touch-none select-none"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onWheel={handleWheel}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+      >
+        {image ? (
+          <div
+            className="absolute left-1/2 top-1/2 origin-center"
+            style={{
+              transform: `translate(calc(-50% + ${pan.x}px), calc(-50% + ${pan.y}px)) scale(${zoom})`,
+            }}
+          >
+            <canvas
+              ref={canvasRef}
+              onClick={handleCanvasClick}
+              className="block max-w-none rounded shadow-2xl"
+              style={{
+                width: 'min(calc(100vw - 24px), calc((100vh - 80px) * 1.5))',
+                height: 'auto',
+                aspectRatio: `${image.naturalWidth} / ${image.naturalHeight}`,
+                cursor: zoom > 1 ? 'grab' : 'crosshair',
+              }}
+              aria-label="Begonia marker canvas"
+            />
+          </div>
+        ) : (
+          <div className="absolute inset-0 flex items-center justify-center text-white/60">Loading image…</div>
+        )}
+
+        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1 rounded-xl border border-white/10 bg-neutral-900/95 p-1 shadow-xl">
+          <Button variant="ghost" size="icon" className="h-10 w-10" onClick={() => setZoomAtPoint(zoom / 1.25)} disabled={zoom <= MIN_ZOOM} aria-label="Zoom out"><Minus class="h-5 w-5" /></Button>
+          <button className="min-w-14 text-sm tabular-nums" onClick={fitAndReset} aria-label="Reset zoom">{Math.round(zoom * 100)}%</button>
+          <Button variant="ghost" size="icon" className="h-10 w-10" onClick={() => setZoomAtPoint(zoom * 1.25)} disabled={zoom >= MAX_ZOOM} aria-label="Zoom in"><Plus class="h-5 w-5" /></Button>
+        </div>
+      </section>
+    </main>
   );
 }
